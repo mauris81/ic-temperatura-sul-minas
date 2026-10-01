@@ -1,0 +1,255 @@
+---
+title: "Temperatura máxima e mínima no Sul e Sudoeste de Minas"
+subtitle: "Plano inicial de Iniciação Científica: fontes de dados, série temporal e publicação"
+date: today
+date-format: "DD/MM/YYYY"
+lang: pt
+format:
+  html:
+    theme: cosmo
+    toc: true
+    toc-title: "Conteúdo"
+    code-fold: true
+    code-summary: "Mostrar código"
+    embed-resources: true
+    include-in-header:
+      text: |
+        <style>.figure-img, .cell-output-display img { max-width: 100%; height: auto; }</style>
+execute:
+  warning: false
+jupyter: python3
+---
+
+```{python}
+#| label: setup
+import datetime as dt
+
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+import plotly.graph_objects as go
+from IPython.display import Markdown
+
+from clima_ssm import DADOS, fontes, graficos, regiao, validacao
+
+COR_TMAX, COR_TMIN = graficos.COR_TMAX, graficos.COR_TMIN
+COR_POS, COR_NEG = "#e34948", "#2a78d6"  # anomalia positiva / negativa
+
+mun = regiao.municipios()
+ssp = mun.set_index("codigo_ibge").loc[regiao.MUNICIPIO_PADRAO]
+estacoes = regiao.estacoes()
+
+
+def br(v: float, casas: int = 1, sinal: bool = False) -> str:
+    """Número com vírgula decimal."""
+    return f"{v:{'+' if sinal else ''}.{casas}f}".replace(".", ",").replace("-", "−")
+
+
+def tabela(df: pd.DataFrame, casas: int = 2):
+    """Tabela sem a coluna de índice e com vírgula decimal."""
+    return df.style.hide(axis="index").format(precision=casas, decimal=",")
+```
+
+## Objetivo
+
+Testar, como primeira etapa do projeto, fontes de dados de temperatura com
+atualização frequente para a mesorregião **Sul/Sudoeste de Minas** (IBGE 3110,
+`{python} len(mun)` municípios), baixar e plotar a série de temperatura máxima (Tmax) e mínima (Tmin)
+de **São Sebastião do Paraíso (SSP)** e publicar o resultado no Posit Connect Cloud.
+
+## Área de estudo
+
+```{python}
+#| label: fig-mapa
+#| fig-cap: "Municípios da mesorregião Sul/Sudoeste de Minas, SSP em destaque e estações automáticas do INMET (círculo: operante; X: em pane)."
+malha = regiao.malha()
+fig, ax = plt.subplots(figsize=(8, 6.5))
+for f in malha["features"]:
+    g = f["geometry"]
+    poligonos = g["coordinates"] if g["type"] == "MultiPolygon" else [g["coordinates"]]
+    destaque = int(f["properties"]["codarea"]) == regiao.MUNICIPIO_PADRAO
+    for pol in poligonos:
+        x, y = zip(*pol[0])
+        ax.fill(x, y, color="#fbd9c9" if destaque else "#f0efec", ec="#c3c2b7", lw=0.5)
+aut = estacoes[estacoes["tipo"] == "T"]
+for _, e in aut.iterrows():
+    em_pane = e["situacao"] != "Operante"
+    ax.scatter(e["lon"], e["lat"], s=42, marker="X" if em_pane else "o",
+               color="#d03b3b" if em_pane else "#0b0b0b", zorder=3, ec="white", lw=0.8)
+    ax.annotate(f"{e['rotulo']} ({e['codigo']})", (e["lon"], e["lat"]), xytext=(5, 4),
+                textcoords="offset points", fontsize=7.5, color="#52514e")
+ax.set_aspect(1 / np.cos(np.radians(-21.5)))
+ax.set_axis_off()
+plt.show()
+```
+
+O INMET tem `{python} len(aut)` estações automáticas dentro da mesorregião. A de SSP (A561) aparece no
+catálogo como **"Pane"** e não registrou temperatura em 2026.
+
+## Fontes de dados avaliadas
+
+Cada fonte foi testada com chamadas reais à API em 01/10/2026, no ponto de SSP.
+
+| Fonte | Tipo de dado | Atualização / defasagem | Período | Precisa de chave? | Resultado do teste |
+|---|---|---|---|---|---|
+| **Open-Meteo**, Historical Weather API | Reanálise ERA5 + análise ECMWF IFS, grade de 9–25 km | Diária, até **ontem** | 1940 → ontem | Não (uso não comercial) | ✅ 1991–30/09/2026 sem falhas |
+| **Open-Meteo**, Forecast API | Modelos de previsão (melhor combinação) | Várias vezes por dia | 92 dias passados + 16 de previsão | Não | ✅ Inclui hoje + 7 dias; 146 municípios numa só chamada |
+| **NASA POWER** | MERRA-2/GEOS, grade de ~0,5° | Diária, defasagem de ~2–3 dias | 1981 → | Não | ✅ Último dia: 28/09/2026 |
+| **INMET**, API de estações (apitempo) | Observação horária das estações automáticas | Horária | 2000 → | **Sim (token)** | ⚠️ Catálogo aberto; dados devolvem 204/404 sem token |
+| **INMET**, BDMEP (arquivos anuais) | Observação horária, CSV por estação | Cerca de uma vez por mês | 2000 → | Não | ✅ 2026 até 31/08 (ZIP de 64 MB) |
+| **Meteostat** (bulk) | Observação (SYNOP/ISD) | Diária | – | Não | ❌ Estações da região param em 2022 |
+| **NOAA GSOD/GHCN** | Observação (ISD) | Diária | – | Não | ❌ Sem dados de 2026 nas estações da região |
+| **CPTEC/INPE** (via BrasilAPI) | Previsão por cidade | Diária | Só previsão | Não | ❌ Erro 500 no teste |
+
+: Fontes testadas para a região {.striped}
+
+**Conclusão:** para uma série **contínua e atualizada todo dia** a melhor opção hoje é a Open-Meteo.
+Ela é dado de modelo e precisa ser comparada com observações. O INMET é a referência observacional:
+o token da API deve ser pedido por e-mail (`cadastro.act@inmet.gov.br`) e, enquanto ele não chega,
+os arquivos do BDMEP servem para validar a série.
+
+## Série temporal de São Sebastião do Paraíso
+
+```{python}
+#| label: dados-ssp
+try:
+    hist = fontes.open_meteo_historico(ssp["lat"], ssp["lon"], "1991-01-01").assign(previsao=False)
+    prev = fontes.open_meteo_previsao(ssp["lat"], ssp["lon"], dias_passados=0, dias_previsao=8)
+    serie = pd.concat([hist, prev[prev["data"] > hist["data"].max()]], ignore_index=True)
+    origem = "baixada da API agora"
+except Exception as erro:  # sem internet: usa a última cópia salva pelo script
+    serie = pd.read_csv(DADOS / "serie_sao_sebastiao_do_paraiso.csv", parse_dates=["data"])
+    origem = f"cópia local (API indisponível: {erro})"
+obs = serie[~serie["previsao"]]
+n_dias = f"{len(obs):,}".replace(",", ".")
+Markdown(
+    f"Série {origem}: **{n_dias} dias** de {obs['data'].min():%d/%m/%Y} a "
+    f"{obs['data'].max():%d/%m/%Y} no ponto ({br(ssp['lat'], 4)}; {br(ssp['lon'], 4)}), "
+    f"mais {int(serie['previsao'].sum())} dias de previsão (hoje + 7)."
+)
+```
+
+```{python}
+#| label: fig-serie
+#| fig-cap: "Tmax e Tmin diárias dos últimos 12 meses com a previsão (acima) e médias anuais com tendência linear (abaixo)."
+fig = graficos.figura_serie(serie, ssp["nome"])
+plt.show()
+```
+
+A versão interativa abaixo mostra a série completa. Use os botões ou arraste a barra inferior para mudar o período.
+
+```{python}
+#| label: fig-interativo
+#| fig-cap: "Série diária completa de Tmax e Tmin em SSP, 1991 até ontem (interativa)."
+fig = go.Figure()
+datas = obs["data"].dt.strftime("%Y-%m-%d")  # texto curto deixa o HTML bem menor
+for col, cor, nome in (("tmax", COR_TMAX, "Tmax"), ("tmin", COR_TMIN, "Tmin")):
+    fig.add_scatter(x=datas, y=obs[col].round(1), name=nome, line=dict(color=cor, width=1.2),
+                    hovertemplate="%{y:.1f} °C")
+fig.update_layout(
+    template="plotly_white", height=430, hovermode="x unified", margin=dict(l=10, r=10, t=30, b=10),
+    separators=",.", yaxis=dict(title="°C", gridcolor="#e1e0d9"),
+    legend=dict(orientation="h", y=1.08, x=0),
+    xaxis=dict(
+        range=[obs["data"].max() - pd.Timedelta(days=730), obs["data"].max()],
+        tickformat="%m/%Y", hoverformat="%d/%m/%Y",
+        rangeslider=dict(visible=True, thickness=0.08),
+        rangeselector=dict(buttons=[
+            dict(count=6, label="6 meses", step="month", stepmode="backward"),
+            dict(count=1, label="1 ano", step="year", stepmode="backward"),
+            dict(count=5, label="5 anos", step="year", stepmode="backward"),
+            dict(label="tudo", step="all"),
+        ]),
+    ),
+)
+fig.show()
+```
+
+## Climatologia e anomalias
+
+```{python}
+#| label: tbl-normal
+#| tbl-cap: "Normal climatológica mensal 1991–2020 em SSP (Open-Meteo)."
+normal = fontes.climatologia_mensal(obs)
+meses = ["Jan", "Fev", "Mar", "Abr", "Mai", "Jun", "Jul", "Ago", "Set", "Out", "Nov", "Dez"]
+tab = normal.assign(mes=[meses[m - 1] for m in normal["mes"]]).set_index("mes").T
+tab.insert(0, "", ["Tmax (°C)", "Tmin (°C)"])
+tabela(tab, 1)
+```
+
+```{python}
+#| label: fig-anomalias
+#| fig-cap: "Anomalia mensal em relação à normal 1991–2020, últimos 24 meses (vermelho: acima da normal; azul: abaixo)."
+mensal = obs.groupby(obs["data"].dt.to_period("M"))[["tmax", "tmin"]].mean()
+mensal = mensal.reset_index().assign(mes=lambda d: d["data"].dt.month).merge(normal, on="mes")
+mensal = mensal.sort_values("data").tail(24)
+fig, eixos = plt.subplots(1, 2, figsize=(11, 3.4), sharey=True, layout="constrained")
+for ax, v, rot in zip(eixos, ("tmax", "tmin"), ("Tmax", "Tmin")):
+    an = mensal[v] - mensal[f"{v}_normal"]
+    x = mensal["data"].dt.to_timestamp()
+    ax.bar(x, an, width=24, color=np.where(an >= 0, COR_POS, COR_NEG))
+    ax.axhline(0, color="#c3c2b7", lw=0.8)
+    graficos.estilo_eixo(ax)
+    ax.set_title(f"Anomalia de {rot}", loc="left", fontsize=10.5)
+    ax.tick_params(axis="x", rotation=45)
+plt.show()
+```
+
+## Validação com as estações do INMET
+
+A série da Open-Meteo foi comparada, dia a dia, com as estações automáticas do INMET de jan. a ago. de 2026
+(arquivos do BDMEP). Viés = modelo − estação.
+
+```{python}
+#| label: tbl-validacao
+#| tbl-cap: "Comparação diária Open-Meteo × INMET (jan.–ago. 2026)."
+res = validacao.resumo_estacoes()
+tabela(res.rename(columns={"estacao": "Estação", "variavel": "Variável", "n_dias": "Dias",
+                           "vies": "Viés (°C)", "mae": "EAM (°C)", "rmse": "REQM (°C)", "r": "r"}))
+```
+
+```{python}
+#| label: fig-validacao-passos
+#| fig-cap: "Passos (A516), a estação operante mais próxima de SSP (~40 km): Open-Meteo × observado."
+par = validacao.pareado("A516")
+fig, eixos = plt.subplots(1, 2, figsize=(10, 4.4), layout="constrained")
+for ax, v, cor, rot in zip(eixos, ("tmax", "tmin"), (COR_TMAX, COR_TMIN), ("Tmax", "Tmin")):
+    p = par[[f"{v}_obs", f"{v}_mod"]].dropna()
+    lim = [min(p.min()) - 1, max(p.max()) + 1]
+    ax.plot(lim, lim, color="#c3c2b7", lw=0.8)
+    ax.scatter(p[f"{v}_obs"], p[f"{v}_mod"], s=14, color=cor, alpha=0.7, ec="none")
+    graficos.estilo_eixo(ax)
+    ax.xaxis.set_major_formatter(lambda val, _: f"{val:.0f} °C")
+    ax.set_xlim(lim); ax.set_ylim(lim)
+    ax.set_xlabel("INMET (observado)", color="#52514e", fontsize=9)
+    ax.set_ylabel("Open-Meteo", color="#52514e", fontsize=9)
+    vies = (p[f"{v}_mod"] - p[f"{v}_obs"]).mean()
+    ax.set_title(f"{rot}: viés {br(vies, sinal=True)} °C, r = {br(p.corr().iloc[0, 1], 2)}", loc="left", fontsize=10.5)
+plt.show()
+```
+
+```{python}
+#| output: asis
+tx = res[res["variavel"] == "Tmax"]
+tn = res[res["variavel"] == "Tmin"]
+print(
+    f"A Open-Meteo acompanha bem a variação dia a dia (r entre {br(res['r'].min(), 2)} e {br(res['r'].max(), 2)}), "
+    f"mas **subestima a Tmax** (viés médio de {br(tx['vies'].mean(), sinal=True)} °C) e, na maioria das estações, "
+    f"**superestima a Tmin** (viés médio de {br(tn['vies'].mean(), sinal=True)} °C). A amplitude térmica diária fica "
+    "achatada, efeito típico de reanálises em grade. Para estudos de extremos (geada, ondas de calor) "
+    "a série precisa de correção de viés com dados de estação."
+)
+```
+
+## Publicação
+
+Este relatório foi escrito em Quarto Markdown (`relatorio.qmd`) no Positron e publicado no
+**Posit Connect Cloud**. O dashboard interativo (`app.py`, Shiny for Python) fica no mesmo repositório.
+
+## Próximos passos
+
+1. Pedir o token da API do INMET (`cadastro.act@inmet.gov.br`) para ter observação horária quase em tempo real.
+2. Baixar o BDMEP de 2016–2019, quando a estação de SSP (A561) funcionava, e validar a Open-Meteo no próprio município.
+3. Testar uma correção de viés simples (por mês ou por quantis) da Open-Meteo com base nas estações.
+4. Calcular índices de extremos (dias com Tmin < 3 °C, risco de geada para o café; Tmax > 32 °C).
+5. Automatizar a atualização diária dos dados (GitHub Actions) e republicar o relatório.

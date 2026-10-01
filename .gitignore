@@ -1,0 +1,13 @@
+.venv/
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# saídas do Quarto (o Connect Cloud renderiza o .qmd no servidor)
+relatorio.html
+relatorio_files/
+.quarto/
+
+# configurações locais de ferramentas
+.claude/
+.vscode/
