@@ -9,8 +9,10 @@ no **Posit Connect Cloud**.
 |---|---|
 | Pesquisa das APIs (testadas em 01/10/2026) | [`docs/pesquisa-apis.md`](docs/pesquisa-apis.md) |
 | Download e gráfico da série de SSP | [`scripts/baixar_serie.py`](scripts/baixar_serie.py) → [`figuras/`](figuras/) |
-| Relatório Quarto | [`relatorio.qmd`](relatorio.qmd) · publicado: _link do Connect Cloud_ |
-| Dashboard (aplicativo) | [`app.py`](app.py) · publicado: _link do Connect Cloud_ |
+| Relatório Quarto | [`relatorio.qmd`](relatorio.qmd) · **[abrir o relatório publicado](https://01a0f8d2-171b-4f7b-84e7-4f8cd9831e22.share.connect.posit.cloud/)** |
+| Dashboard (aplicativo) | [`app.py`](app.py) · **[abrir o dashboard publicado](https://01a0f901-27b9-6e6e-be10-1d5711961833.share.connect.posit.cloud/)** |
+| Guia dos dados (didático) | [`docs/guia-dos-dados.md`](docs/guia-dos-dados.md) |
+| Guia do código (didático) | [`docs/guia-do-codigo.md`](docs/guia-do-codigo.md) |
 
 ![Série de Tmax e Tmin em São Sebastião do Paraíso](figuras/serie_sao_sebastiao_do_paraiso.png)
 
@@ -70,8 +72,13 @@ em **▶ Run Shiny App**, ou abra `relatorio.qmd` e clique em **Preview**.
 
 ## Publicação no Posit Connect Cloud
 
-**Pelo GitHub:** em <https://connect.posit.cloud>, entre com a conta do GitHub, clique em **Publish**, escolha o
-repositório, a branch `main` e o arquivo principal: `relatorio.qmd` para o relatório (tipo Quarto) ou `app.py`
+Os dois conteúdos estão publicados (públicos) a partir da branch `main` deste repositório:
+[relatório](https://01a0f8d2-171b-4f7b-84e7-4f8cd9831e22.share.connect.posit.cloud/) e
+[dashboard](https://01a0f901-27b9-6e6e-be10-1d5711961833.share.connect.posit.cloud/). Depois de um `git push`,
+use **Republicar** na página do conteúdo em <https://connect.posit.cloud> para o servidor pegar a versão nova.
+
+**Pelo GitHub (nova publicação):** em <https://connect.posit.cloud>, entre com a conta do GitHub, clique em **Publish**,
+escolha o repositório, a branch `main` e o arquivo principal: `relatorio.qmd` para o relatório (tipo Quarto) ou `app.py`
 para o dashboard (tipo Shiny). Use Python 3.11. O Connect Cloud instala o `requirements.txt` e roda o código no servidor.
 
 **Pelo Positron:** abra o arquivo, clique no ícone **Posit Publisher** na barra lateral, adicione a credencial do
@@ -84,3 +91,7 @@ Connect Cloud (*Credentials → + → Posit Connect Cloud*) e clique em **Deploy
 3. Testar correção de viés (mensal ou por quantis) com base nas estações.
 4. Índices de extremos (geada para o café: Tmin < 3 °C; calor: Tmax > 32 °C).
 5. Atualização diária automática (GitHub Actions) e republicação do relatório.
+
+## Créditos
+
+Autoria: Mauris81 (Iniciação Científica). Colaboração: Claude (Anthropic), na pesquisa das APIs, no código e na documentação.
