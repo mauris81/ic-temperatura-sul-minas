@@ -10,11 +10,10 @@ from functools import lru_cache
 
 import pandas as pd
 import plotly.graph_objects as go
-from plotly.subplots import make_subplots
 from shiny import App, reactive, render, req, ui
 from shinywidgets import output_widget, render_plotly
 
-from clima_ssm import fontes, regiao, validacao
+from clima_ssm import fontes, regiao
 
 COR_TMAX = "#eb6834"
 COR_TMIN = "#2a78d6"
@@ -26,10 +25,7 @@ MESES = ["Jan", "Fev", "Mar", "Abr", "Mai", "Jun", "Jul", "Ago", "Set", "Out", "
 
 MUN = regiao.municipios()
 MUN_IDX = MUN.set_index("codigo_ibge")
-EST = regiao.estacoes()
 MALHA = regiao.malha_para_plotly(regiao.malha())
-OBS_INMET = validacao.observado()
-ESTACOES_COM_DADO = sorted(OBS_INMET.dropna(subset=["tmax"])["codigo"].unique())
 
 
 def br(v: float, casas: int = 1) -> str:
@@ -52,21 +48,10 @@ def _previsao(codigo: int, hora: str) -> pd.DataFrame:
     return fontes.open_meteo_previsao(m["lat"], m["lon"], dias_passados=0, dias_previsao=8)
 
 
-@lru_cache(maxsize=48)
-def _power(codigo: int, inicio: dt.date, fim: dt.date) -> pd.DataFrame:
-    m = MUN_IDX.loc[codigo]
-    return fontes.nasa_power(m["lat"], m["lon"], inicio, fim)
-
-
 @lru_cache(maxsize=4)
 def _regional(hora: str) -> pd.DataFrame:
     df = fontes.open_meteo_varios_pontos(MUN["lat"].tolist(), MUN["lon"].tolist(), dias_passados=31, dias_previsao=2)
     return df.assign(codigo_ibge=MUN["codigo_ibge"].to_numpy()[df["ponto"]])
-
-
-@lru_cache(maxsize=16)
-def _pareado(codigo: str, dia: dt.date) -> pd.DataFrame:
-    return validacao.pareado(codigo, OBS_INMET)
 
 
 def _hora() -> str:
@@ -126,7 +111,6 @@ app_ui = ui.page_sidebar(
         ui.input_switch("previsao", "Mostrar previsão (hoje + 7 dias)", True),
         ui.input_switch("normal", "Mostrar normal 1991–2020", True),
         ui.input_switch("media7", "Suavizar (média móvel de 7 dias)", False),
-        ui.input_switch("power", "Comparar com NASA POWER", False),
         ui.hr(),
         ui.output_ui("rodape"),
         width=320,
@@ -150,23 +134,8 @@ app_ui = ui.page_sidebar(
             "Mapa da região",
             ui.input_select("var_mapa", None, VARIAVEIS_MAPA, width="320px"),
             output_widget("g_mapa"),
-            ui.p("Passe o mouse sobre um município para ver o valor. Contorno preto: município selecionado; "
-                 "pontos: estações do INMET (X = em pane).", class_="text-muted small"),
-        ),
-        ui.nav_panel(
-            "Estações INMET",
-            ui.markdown(
-                "Estações do INMET dentro da mesorregião e comparação dia a dia com a Open-Meteo "
-                "(dados observados do BDMEP; viés = Open-Meteo − estação)."
-            ),
-            ui.output_data_frame("t_estacoes"),
-            ui.input_select(
-                "estacao", "Validar a estação",
-                {c: f"{EST.set_index('codigo').loc[c, 'rotulo']} ({c})" for c in ESTACOES_COM_DADO},
-                selected="A516", width="320px",
-            ),
-            ui.output_data_frame("t_validacao"),
-            output_widget("g_validacao"),
+            ui.p("Passe o mouse sobre um município para ver o valor. Contorno preto: município selecionado.",
+                 class_="text-muted small"),
         ),
         ui.nav_panel(
             "Dados",
@@ -313,16 +282,6 @@ def server(input, output, session):
             p[["tmax", "tmin"]] = p[["tmax", "tmin"]].rolling(7, center=True, min_periods=4).mean()
         for col, cor, nome in (("tmax", COR_TMAX, "Tmax"), ("tmin", COR_TMIN, "Tmin")):
             fig.add_scatter(x=p["data"], y=p[col], name=nome, line=dict(color=cor, width=1.6), hovertemplate="%{y:.1f} °C")
-        if input.power():
-            inicio, fim = input.periodo()
-            pw = _power(codigo(), inicio, fim)
-            if input.media7():
-                pw = pw.assign(**{c: pw[c].rolling(7, center=True, min_periods=4).mean() for c in ("tmax", "tmin")})
-            for col, cor, nome in (("tmax", COR_TMAX, "Tmax NASA POWER"), ("tmin", COR_TMIN, "Tmin NASA POWER")):
-                fig.add_scatter(
-                    x=pw["data"], y=pw[col], name=nome, opacity=0.6,
-                    line=dict(color=cor, width=1.2, dash="dot"), hovertemplate="%{y:.1f} °C",
-                )
         if input.previsao() and input.periodo()[1] >= fontes.ontem():
             prev = pd.concat([p.tail(1), previsao()])  # liga a previsão ao último dado
             for col, cor in (("tmax", COR_TMAX), ("tmin", COR_TMIN)):
@@ -395,74 +354,12 @@ def server(input, output, session):
                 marker=dict(line=dict(color="#0b0b0b", width=2.5)), hoverinfo="skip",
             )
         )
-        aut = EST[EST["tipo"] == "T"]
-        fig.add_trace(
-            go.Scattergeo(
-                lon=aut["lon"], lat=aut["lat"], mode="markers", name="Estações INMET",
-                marker=dict(size=8, color="#0b0b0b", line=dict(color="white", width=1.5),
-                            symbol=["x" if s != "Operante" else "circle" for s in aut["situacao"]]),
-                text=[f"{r} ({c}) · {s}" for r, c, s in zip(aut["rotulo"], aut["codigo"], aut["situacao"])],
-                hovertemplate="%{text}<extra></extra>",
-            )
-        )
         fig.update_geos(fitbounds="locations", visible=False)
         fig.update_layout(
             height=560, margin=dict(l=0, r=0, t=40, b=0), showlegend=False,
             title=dict(text=VARIAVEIS_MAPA[var] + " (Open-Meteo)", font=dict(size=15)),
             font=dict(family="system-ui, -apple-system, 'Segoe UI', sans-serif"), separators=",.",
         )
-        return fig
-
-    @render.data_frame
-    def t_estacoes():
-        ano = OBS_INMET["data"].dt.year.max()
-        obs = OBS_INMET[OBS_INMET["data"].dt.year == ano]
-        cobertura = pd.DataFrame(
-            {
-                "pct": obs.groupby("codigo")["tmax"].apply(lambda s: round(100 * s.notna().mean())),
-                "ultimo": obs.dropna(subset=["tmax"]).groupby("codigo")["data"].max(),
-            }
-        )
-        t = EST.join(cobertura, on="codigo")
-        t = pd.DataFrame(
-            {
-                "Código": t["codigo"],
-                "Estação": t["rotulo"],
-                "Município": t["municipio"],
-                "Tipo": t["tipo"].map({"T": "Automática", "M": "Convencional"}),
-                "Situação (catálogo)": t["situacao"],
-                f"Dias com Tmax em {ano}": t["pct"].map(lambda v: "–" if pd.isna(v) else f"{v:.0f}%"),
-                "Último dia com dado": t["ultimo"].dt.strftime("%d/%m/%Y").fillna("–"),
-            }
-        )
-        return render.DataGrid(t, width="100%")
-
-    @render.data_frame
-    def t_validacao():
-        m = validacao.metricas(_pareado(input.estacao(), fontes.hoje()))
-        m = m.rename(columns={"variavel": "Variável", "n_dias": "Dias", "vies": "Viés (°C)", "mae": "EAM (°C)", "rmse": "REQM (°C)", "r": "r"})
-        return render.DataGrid(m.round(2), width="100%")
-
-    @render_plotly
-    def g_validacao():
-        par = _pareado(input.estacao(), fontes.hoje())
-        fig = make_subplots(rows=1, cols=2, subplot_titles=("Tmax", "Tmin"), horizontal_spacing=0.12)
-        for i, (v, cor) in enumerate((("tmax", COR_TMAX), ("tmin", COR_TMIN)), start=1):
-            p = par[["data", f"{v}_obs", f"{v}_mod"]].dropna()
-            lo, hi = min(p[f"{v}_obs"].min(), p[f"{v}_mod"].min()) - 1, max(p[f"{v}_obs"].max(), p[f"{v}_mod"].max()) + 1
-            fig.add_scatter(x=[lo, hi], y=[lo, hi], mode="lines", line=dict(color="#c3c2b7", width=1),
-                            hoverinfo="skip", showlegend=False, row=1, col=i)
-            fig.add_scatter(
-                x=p[f"{v}_obs"], y=p[f"{v}_mod"], mode="markers", showlegend=False,
-                marker=dict(color=cor, size=8, opacity=0.7, line=dict(color="white", width=1)),
-                customdata=p["data"].dt.strftime("%d/%m/%Y"),
-                hovertemplate="%{customdata}<br>INMET %{x:.1f} °C<br>Open-Meteo %{y:.1f} °C<extra></extra>",
-                row=1, col=i,
-            )
-            fig.update_xaxes(title_text="INMET (observado)", range=[lo, hi], ticksuffix=" °C", row=1, col=i)
-            fig.update_yaxes(title_text="Open-Meteo", range=[lo, hi], ticksuffix=" °C", row=1, col=i)
-        _layout(fig, 420)
-        fig.update_layout(hovermode="closest")
         return fig
 
     @reactive.calc
@@ -497,13 +394,11 @@ Sul/Sudoeste de Minas (IBGE 3110), com dados atualizados todo dia.
 
 - **Open-Meteo**, Historical Weather API: reanálise ERA5 + análise ECMWF IFS, de 1991 até ontem.
   Forecast API: previsão de hoje + 7 dias e mapa regional. Sem chave, uso não comercial.
-- **NASA POWER**: MERRA-2/GEOS, grade de ~0,5°, defasagem de 2–3 dias (opção de comparação).
-- **INMET**: catálogo de estações e arquivos anuais do BDMEP (observação horária), usados para validar
-  a Open-Meteo. A API em tempo real do INMET exige token (cadastro.act@inmet.gov.br).
 - **IBGE**: lista de municípios e malhas territoriais.
 
-**Cuidados.** A Open-Meteo é dado de modelo em grade, não medição. Nas estações da região ela
-subestima a Tmax (≈ −1 a −2 °C) e superestima a Tmin (≈ +1 a +3 °C); veja a aba *Estações INMET*.
+**Cuidados.** A Open-Meteo é dado de modelo em grade, não medição. Comparada com estações do INMET
+da região, ela tende a subestimar a Tmax e superestimar a Tmin; por isso, os valores extremos devem
+ser lidos com cautela.
 
 Código e relatório: repositório do projeto no GitHub (`ic-temperatura-sul-minas`).
 """
