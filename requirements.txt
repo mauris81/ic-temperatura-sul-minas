@@ -7,7 +7,5 @@ plotly==7.1.0
 shiny==1.8.0
 shinywidgets==0.8.1
 jupyter==1.1.1
-# Relatório 2 (ondas de calor, tendência e previsão), testadas em 28/10/2026
+# Ondas de calor (clima_ssm/ondas.py), usado pelo dashboard
 pymannkendall==1.4.3
-statsmodels==0.15.0
-statsforecast==2.1.1
