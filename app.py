@@ -10,15 +10,19 @@ from functools import lru_cache
 
 import pandas as pd
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 from shiny import App, reactive, render, req, ui
 from shinywidgets import output_widget, render_plotly
 
-from clima_ssm import fontes, regiao
+from clima_ssm import fontes, ondas, regiao
 
 COR_TMAX = "#eb6834"
 COR_TMIN = "#2a78d6"
 COR_GRADE = "#e1e0d9"
 COR_TEXTO_2 = "#52514e"
+COR_BARRA = "#a8401a"
+COR_BARRA_PREVISTA = "#f19a6e"
+ROTULO_LIMITE = {"p90_tmax": "P90 da Tmax", "p90_tmin": "P90 da Tmin", "normal5_tmax": "Normal da Tmax + 5 °C"}
 ESCALA_LARANJA = [[0, "#fde6d8"], [0.5, "#f19a6e"], [1, "#a8401a"]]
 ESCALA_AZUL = [[0, "#cde2fb"], [0.5, "#5598e7"], [1, "#0d366b"]]
 MESES = ["Jan", "Fev", "Mar", "Abr", "Mai", "Jun", "Jul", "Ago", "Set", "Out", "Nov", "Dez"]
@@ -40,6 +44,11 @@ def br(v: float, casas: int = 1) -> str:
 def _historico(codigo: int, dia: dt.date) -> pd.DataFrame:
     m = MUN_IDX.loc[codigo]
     return fontes.open_meteo_historico(m["lat"], m["lon"], "1991-01-01")
+
+
+@lru_cache(maxsize=48)
+def _limites(codigo: int, dia: dt.date) -> pd.DataFrame:
+    return ondas.limites_diarios(_historico(codigo, dia))
 
 
 @lru_cache(maxsize=48)
@@ -125,6 +134,25 @@ app_ui = ui.page_sidebar(
     ),
     ui.navset_card_underline(
         ui.nav_panel("Série temporal", output_widget("g_serie")),
+        ui.nav_panel(
+            "Ondas de calor",
+            ui.input_checkbox_group(
+                "metodos", "Critérios (marque um para ver só ele, ou vários para comparar)",
+                {k: m.nome for k, m in ondas.METODOS.items()}, selected=list(ondas.METODOS), inline=True,
+            ),
+            ui.div(
+                ui.input_action_button("metodos_todos", "Marcar todos", class_="btn-sm btn-outline-secondary"),
+                ui.input_action_button("metodos_limpar", "Desmarcar todos", class_="btn-sm btn-outline-secondary"),
+                class_="d-flex gap-2 mb-2",
+            ),
+            output_widget("g_ondas"),
+            ui.output_ui("nota_ondas"),
+            ui.layout_columns(
+                ui.div(ui.h6("Todos os critérios no período"), ui.output_data_frame("t_metodos")),
+                ui.div(ui.h6("Ondas dos critérios marcados"), ui.output_data_frame("t_ondas")),
+                col_widths={"sm": 12, "xl": (7, 5)},
+            ),
+        ),
         ui.nav_panel(
             "Climatologia",
             ui.input_select("ano", "Comparar o ano", choices=[], width="200px"),
@@ -295,6 +323,193 @@ def server(input, output, session):
         fig.update_layout(title=dict(text=f"Tmax e Tmin diárias, {municipio()['nome']}"))
         return _layout(fig, 470)
 
+    # --- ondas de calor ---
+
+    @reactive.calc
+    def janela_ondas() -> tuple[pd.Timestamp, pd.Timestamp]:
+        """Período escolhido; se a previsão estiver ligada e o período chegar a ontem, vai até o fim dela."""
+        inicio, fim = req(input.periodo())
+        fim = pd.Timestamp(fim)
+        if input.previsao() and fim.date() >= fontes.ontem() and not previsao().empty:
+            fim = previsao()["data"].max()
+        return pd.Timestamp(inicio), fim
+
+    @reactive.calc
+    def ondas_todas() -> dict[str, tuple[pd.DataFrame, pd.DataFrame]]:
+        """Dias marcados e eventos de cada critério, na série inteira (+ previsão, se ligada)."""
+        serie = historico()[["data", "tmax", "tmin"]]
+        if input.previsao():
+            serie = pd.concat([serie, previsao()[["data", "tmax", "tmin"]]], ignore_index=True)
+        lim = _limites(codigo(), fontes.hoje())
+        return {k: ondas.ondas_por_metodo(serie, lim, m) for k, m in ondas.METODOS.items()}
+
+    def _no_periodo(ev: pd.DataFrame) -> pd.DataFrame:
+        inicio, fim = janela_ondas()
+        return ev[(ev["fim"] >= inicio) & (ev["inicio"] <= fim)]
+
+    @reactive.effect
+    @reactive.event(input.metodos_todos)
+    def _marcar_todos():
+        ui.update_checkbox_group("metodos", selected=list(ondas.METODOS))
+
+    @reactive.effect
+    @reactive.event(input.metodos_limpar)
+    def _desmarcar_todos():
+        ui.update_checkbox_group("metodos", selected=[])
+
+    @reactive.calc
+    def metodos() -> list[str]:
+        """Critérios marcados, sempre na ordem de ``ondas.METODOS``."""
+        return [k for k in ondas.METODOS if k in input.metodos()]
+
+    @render_plotly
+    def g_ondas():
+        escolhidos = metodos()
+        todas = ondas_todas()
+        inicio, fim = janela_ondas()
+        d = todas["oliveira"][0]
+        d = d[d["data"].between(inicio, fim)]
+        req(not d.empty)
+        hoje = pd.Timestamp(fontes.hoje())
+        meio_dia = pd.Timedelta(hours=12)  # a barra/faixa cobre o dia inteiro
+        n = len(escolhidos)
+        alt_barras = 50 + 32 * n
+        fig = make_subplots(
+            rows=2 if n else 1, cols=1, shared_xaxes=True, vertical_spacing=0.05,
+            row_heights=[400, alt_barras] if n else None,
+        )
+
+        # em cima: temperaturas e os limites que os critérios marcados usam
+        usadas = {lim: var for k in escolhidos for var, lim in ondas.METODOS[k].condicoes}
+        for var, cor, nome in (("tmax", COR_TMAX, "Tmax"), ("tmin", COR_TMIN, "Tmin")):
+            fig.add_scatter(
+                x=d["data"], y=d[var], name=nome, mode="lines", line=dict(color=cor, width=1.5),
+                opacity=1 if var in usadas.values() else 0.3, hovertemplate="%{y:.1f} °C", row=1, col=1,
+            )
+        for lim, rotulo in ROTULO_LIMITE.items():
+            if lim in usadas:
+                fig.add_scatter(
+                    x=d["data"], y=d[lim], name=rotulo, mode="lines", hovertemplate="%{y:.1f} °C", row=1, col=1,
+                    line=dict(color=COR_TMAX if usadas[lim] == "tmax" else COR_TMIN, width=1.3,
+                              dash="dash" if lim == "normal5_tmax" else "dot"),
+                )
+
+        # embaixo: uma linha por critério, uma barra por onda
+        for k in escolhidos:
+            m = ondas.METODOS[k]
+            ev = _no_periodo(todas[k][1])
+            for prevista, cor in ((False, COR_BARRA), (True, COR_BARRA_PREVISTA)):
+                xs = []
+                for e in ev[(ev["fim"] >= hoje) == prevista].itertuples():
+                    xs += [e.inicio - meio_dia, e.fim + meio_dia, None]
+                fig.add_scatter(
+                    x=xs, y=[None if x is None else m.nome for x in xs], mode="lines", showlegend=False,
+                    line=dict(color=cor, width=14), hoverinfo="skip", row=2, col=1,
+                )
+            dias, texto = [], []  # pontos invisíveis, um por dia de onda, só para o tooltip
+            for e in ev.itertuples():
+                datas = pd.date_range(e.inicio, e.fim)
+                dias += list(datas)
+                texto += [f"{e.inicio:%d/%m} a {e.fim:%d/%m/%Y} ({e.duracao} dias)"] * len(datas)
+            fig.add_scatter(  # o primeiro ponto, sem texto, garante a linha do critério mesmo sem ondas
+                x=[inicio] + dias, y=[m.nome] * (len(dias) + 1), text=[""] + texto, mode="markers",
+                marker=dict(size=14, color="rgba(0,0,0,0)"), name=m.nome, showlegend=False,
+                hovertemplate="%{text}<extra>%{fullData.name}</extra>", row=2, col=1,
+            )
+
+        if n:  # em cima, o fundo de cada dia escurece com o número de critérios que o põem em onda
+            votos = pd.Series(0, index=pd.DatetimeIndex(d["data"]))
+            for k in escolhidos:
+                for e in _no_periodo(todas[k][1]).itertuples():
+                    votos[e.inicio:e.fim] += 1
+            trecho = votos.ne(votos.shift()).cumsum()  # dias seguidos com o mesmo número de votos
+            fig.update_layout(shapes=[
+                dict(
+                    type="rect", xref="x", yref="y domain", y0=0, y1=1, layer="below", line_width=0,
+                    x0=t.index[0] - meio_dia, x1=t.index[-1] + meio_dia,
+                    fillcolor=f"rgba(235, 104, 52, {0.04 + 0.28 * t.iloc[0] / n:.3f})",
+                )
+                for _, t in votos.groupby(trecho) if t.iloc[0] > 0
+            ])
+            fig.add_scatter(
+                x=votos.index, y=d["tmax"], text=[f"{v} de {n}" for v in votos], mode="markers",
+                marker=dict(color="rgba(0,0,0,0)"), name="Critérios em onda", showlegend=False,
+                hovertemplate="%{text}", row=1, col=1,
+            )
+            fig.add_scatter(
+                x=[None], y=[None], mode="markers", hoverinfo="skip", row=1, col=1,
+                name="Dia em onda (mais escuro = mais critérios)" if n > 1 else "Dia em onda",
+                marker=dict(symbol="square", size=13, color="rgba(235, 104, 52, 0.32)"),
+            )
+        if d["data"].max() >= hoje:
+            fig.add_vline(x=hoje, line=dict(color="#898781", width=1, dash="dash"), row="all", col=1)
+            fig.add_annotation(
+                x=hoje, y=1, xref="x", yref="paper", text="previsão →", showarrow=False, xanchor="left",
+                font=dict(size=11, color=COR_TEXTO_2),
+            )
+
+        if n == 1:
+            q = len(_no_periodo(todas[escolhidos[0]][1]))
+            titulo = f"{ondas.METODOS[escolhidos[0]].nome}: {q} onda{'s' if q != 1 else ''} de calor no período"
+        elif n:
+            titulo = f"Ondas de calor por critério ({n} critérios)"
+        else:
+            titulo = "Marque ao menos um critério para ver as ondas de calor"
+        fig.update_layout(title=dict(text=f"{titulo}, {municipio()['nome']}"))
+        fig.update_xaxes(tickformat="%m/%Y", hoverformat="%d/%m/%Y")
+        _layout(fig, 400 + (alt_barras if n else 0) + 70)
+        fig.update_yaxes(automargin=True)
+        if n:
+            nomes = [ondas.METODOS[k].nome for k in escolhidos]
+            fig.update_yaxes(
+                row=2, col=1, ticksuffix="", showgrid=False, fixedrange=True, tickfont=dict(size=11),
+                categoryorder="array", categoryarray=nomes[::-1], range=[-0.6, n - 0.4],
+            )
+        return fig
+
+    @render.ui
+    def nota_ondas():
+        return ui.p(
+            "Embaixo, cada linha é um critério e cada barra é uma onda de calor (as barras claras entram na "
+            "previsão). Em cima, o fundo laranja marca os dias em onda: quanto mais escuro, mais critérios marcados "
+            "concordam (passe o mouse para ver quantos). "
+            "O P90 e a normal de cada dia do ano vêm de 1991–2020, numa janela de 15 dias. "
+            "Intensidade: quanto, em média, a temperatura passou do limite nos dias da onda.",
+            class_="text-muted small",
+        )
+
+    @render.data_frame
+    def t_metodos():
+        linhas = []
+        for k, m in ondas.METODOS.items():
+            ev = _no_periodo(ondas_todas()[k][1])
+            linhas.append({
+                "Critério": m.nome,
+                "Regra": m.descricao,
+                "Ondas": len(ev),
+                "Dias em onda": int(ev["duracao"].sum()),
+                "Maior (dias)": int(ev["duracao"].max()) if len(ev) else 0,
+                "Intensidade (°C)": round(ev["intensidade"].mean(), 1) if len(ev) else None,
+            })
+        return render.DataGrid(pd.DataFrame(linhas), width="100%")
+
+    @render.data_frame
+    def t_ondas():
+        hoje = pd.Timestamp(fontes.hoje())
+        partes = [_no_periodo(ondas_todas()[k][1]).assign(criterio=ondas.METODOS[k].nome) for k in metodos()]
+        req(partes)
+        ev = pd.concat(partes).sort_values("inicio", ascending=False, kind="stable")
+        tabela = pd.DataFrame({
+            "Critério": ev["criterio"],
+            "Início": ev["inicio"].dt.strftime("%d/%m/%Y"),
+            "Fim": ev["fim"].dt.strftime("%d/%m/%Y"),
+            "Dias": ev["duracao"],
+            "Intensidade (°C)": ev["intensidade"].round(1),
+            "Pico (°C)": ev["pico"].round(1),
+            "Prevista": (ev["fim"] >= hoje).map({True: "sim", False: ""}),
+        })
+        return render.DataGrid(tabela, width="100%", height="360px")
+
     @render_plotly
     def g_clima():
         h = historico()
@@ -395,6 +610,11 @@ Sul/Sudoeste de Minas (IBGE 3110), com dados atualizados todo dia.
 - **Open-Meteo**, Historical Weather API: reanálise ERA5 + análise ECMWF IFS, de 1991 até ontem.
   Forecast API: previsão de hoje + 7 dias e mapa regional. Sem chave, uso não comercial.
 - **IBGE**: lista de municípios e malhas territoriais.
+
+**Ondas de calor.** Sete critérios da literatura (tabela de Fante, 2024): WSDI da OMM, IPCC,
+Silveira (2014), Díaz et al. (2002), Geirinhas et al. (2018, pela Tmax e pela Tmin) e
+Oliveira et al. (2021), que é o usado no artigo. Todos comparam o dia com o limite do seu dia do ano
+(P90 ou normal + 5 °C), calculado em 1991–2020 numa janela de 15 dias; mudam a variável e a duração mínima.
 
 **Cuidados.** A Open-Meteo é dado de modelo em grade, não medição. Comparada com estações do INMET
 da região, ela tende a subestimar a Tmax e superestimar a Tmin; por isso, os valores extremos devem

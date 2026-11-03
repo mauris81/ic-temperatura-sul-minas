@@ -53,25 +53,31 @@ def _diario(datas, tmax, tmin, fonte: str, formato: str = "%Y-%m-%d") -> pd.Data
 
 
 def open_meteo_historico(
-    lat: float, lon: float, inicio: dt.date | str = "1991-01-01", fim: dt.date | str | None = None
+    lat: float,
+    lon: float,
+    inicio: dt.date | str = "1991-01-01",
+    fim: dt.date | str | None = None,
+    models: str | None = None,
 ) -> pd.DataFrame:
     """Série diária da Historical Weather API (reanálise ERA5 + análise ECMWF IFS).
 
     Vai de 1940 até ontem; não precisa de chave. É dado de modelo, não de estação.
+    ``models`` fixa um produto (ex.: ``"era5_land"``, que chega com ~6 dias de atraso);
+    ``None`` usa a melhor combinação da API.
     """
-    js = _get(
-        URL_OM_HISTORICO,
-        {
-            "latitude": lat,
-            "longitude": lon,
-            "start_date": str(inicio),
-            "end_date": str(fim or ontem()),
-            "daily": "temperature_2m_max,temperature_2m_min",
-            "timezone": FUSO,
-        },
-    )
-    d = js["daily"]
-    return _diario(d["time"], d["temperature_2m_max"], d["temperature_2m_min"], "Open-Meteo (histórico)")
+    params = {
+        "latitude": lat,
+        "longitude": lon,
+        "start_date": str(inicio),
+        "end_date": str(fim or ontem()),
+        "daily": "temperature_2m_max,temperature_2m_min",
+        "timezone": FUSO,
+    }
+    if models:
+        params["models"] = models
+    d = _get(URL_OM_HISTORICO, params)["daily"]
+    fonte = f"Open-Meteo ({models})" if models else "Open-Meteo (histórico)"
+    return _diario(d["time"], d["temperature_2m_max"], d["temperature_2m_min"], fonte)
 
 
 def open_meteo_previsao(lat: float, lon: float, dias_passados: int = 14, dias_previsao: int = 7) -> pd.DataFrame:
