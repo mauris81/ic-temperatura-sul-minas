@@ -10,6 +10,7 @@ no **Posit Connect Cloud**.
 | Pesquisa das APIs (testadas em 01/10/2026) | [`docs/pesquisa-apis.md`](docs/pesquisa-apis.md) |
 | Download e gráfico da série de SSP | [`scripts/baixar_serie.py`](scripts/baixar_serie.py) → [`figuras/`](figuras/) |
 | Relatório Quarto | [`relatorio.qmd`](relatorio.qmd) · **[abrir o relatório publicado](https://01a0f8d2-171b-4f7b-84e7-4f8cd9831e22.share.connect.posit.cloud/)** |
+| Relatório 2: ondas de calor, validação com o INMET, tendência e previsão (ERA5-Land) | [`relatorio2.qmd`](relatorio2.qmd) · **[abrir o relatório 2 publicado](https://01a20fb2-21cf-a0b4-02e6-2fc4d98afcb7.share.connect.posit.cloud/)** |
 | Dashboard (aplicativo) | [`app.py`](app.py) · **[abrir o dashboard publicado](https://01a0f901-27b9-6e6e-be10-1d5711961833.share.connect.posit.cloud/)** |
 | Guia dos dados (didático) | [`docs/guia-dos-dados.md`](docs/guia-dos-dados.md) |
 | Guia do código (didático) | [`docs/guia-do-codigo.md`](docs/guia-do-codigo.md) |
@@ -72,8 +73,9 @@ em **▶ Run Shiny App**, ou abra `relatorio.qmd` e clique em **Preview**.
 
 ## Publicação no Posit Connect Cloud
 
-Os dois conteúdos estão publicados (públicos) a partir da branch `main` deste repositório:
-[relatório](https://01a0f8d2-171b-4f7b-84e7-4f8cd9831e22.share.connect.posit.cloud/) e
+Os três conteúdos estão publicados (públicos) a partir da branch `main` deste repositório:
+[relatório](https://01a0f8d2-171b-4f7b-84e7-4f8cd9831e22.share.connect.posit.cloud/),
+[relatório 2](https://01a20fb2-21cf-a0b4-02e6-2fc4d98afcb7.share.connect.posit.cloud/) e
 [dashboard](https://01a0f901-27b9-6e6e-be10-1d5711961833.share.connect.posit.cloud/). Depois de um `git push`,
 use **Republicar** na página do conteúdo em <https://connect.posit.cloud> para o servidor pegar a versão nova.
 
