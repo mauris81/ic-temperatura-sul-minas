@@ -1,0 +1,625 @@
+---
+title: "Ondas de calor em São Sebastião do Paraíso (MG)"
+subtitle: "Relatório 2 de Iniciação Científica: série ERA5-Land, ondas de calor, tendência e previsão"
+date: today
+date-format: "DD/MM/YYYY"
+lang: pt
+bibliography: relatorio2.bib
+format:
+  html:
+    theme: cosmo
+    toc: true
+    toc-title: "Conteúdo"
+    code-fold: true
+    code-summary: "Mostrar código"
+    embed-resources: true
+    include-in-header:
+      text: |
+        <style>.figure-img, .cell-output-display img { max-width: 100%; height: auto; }</style>
+execute:
+  warning: false
+jupyter: python3
+---
+
+```{python}
+#| label: setup
+import matplotlib.dates as mdates
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+from IPython.display import Markdown
+from statsforecast import StatsForecast
+from statsforecast.models import AutoARIMA, AutoETS, SeasonalNaive
+from statsmodels.tsa.seasonal import STL
+
+from clima_ssm import DADOS, fontes, graficos, ondas, regiao
+from clima_ssm import reconstrucao as rc
+
+COR_TMAX, COR_TMIN = graficos.COR_TMAX, graficos.COR_TMIN
+COR_ONDA = "#e34948"
+MESES = ["Jan", "Fev", "Mar", "Abr", "Mai", "Jun", "Jul", "Ago", "Set", "Out", "Nov", "Dez"]
+
+ssp = regiao.municipios().set_index("codigo_ibge").loc[regiao.MUNICIPIO_PADRAO]
+
+
+def br(v: float, casas: int = 1, sinal: bool = False) -> str:
+    """Número com vírgula decimal."""
+    return f"{v:{'+' if sinal else ''}.{casas}f}".replace(".", ",").replace("-", "−")
+
+
+def inteiro(v: int) -> str:
+    """Inteiro com ponto de milhar."""
+    return f"{v:,}".replace(",", ".")
+
+
+def tabela(df: pd.DataFrame, casas: int = 2):
+    """Tabela sem a coluna de índice e com vírgula decimal."""
+    return df.style.hide(axis="index").format(precision=casas, decimal=",")
+```
+
+## Objetivo
+
+Identificar as ondas de calor em **São Sebastião do Paraíso (SSP)**, no Sul/Sudoeste de Minas,
+com uma série diária longa e sem falhas de temperatura máxima (Tmax) e mínima (Tmin), verificar
+se elas ficaram mais frequentes, longas ou intensas ao longo das décadas e testar modelos de séries
+temporais para prever as médias mensais de temperatura nos próximos dois anos.
+
+## Dados
+
+```{python}
+#| label: dados
+ARQ = DADOS / "serie_era5land_ssp.csv"
+try:
+    serie = fontes.open_meteo_historico(ssp["lat"], ssp["lon"], "1981-01-01", models="era5_land")
+    serie.to_csv(ARQ, index=False, date_format="%Y-%m-%d")  # cópia para quando a API falhar
+    origem = "baixada da API na hora de gerar o relatório"
+except Exception as erro:
+    serie = pd.read_csv(ARQ, parse_dates=["data"])
+    origem = f"lida da cópia local (API indisponível: {erro})"
+
+ANO_INI = int(serie["data"].dt.year.min())
+ANO_FIM = int(serie.loc[serie["data"].dt.strftime("%m-%d") == "12-31", "data"].dt.year.max())
+ANOS = range(ANO_INI, ANO_FIM + 1)
+faltando = pd.date_range(serie["data"].min(), serie["data"].max()).difference(serie["data"]).size
+```
+
+- **Fonte:** Open-Meteo, Historical Weather API, com `models=era5_land` (reanálise ERA5-Land do ECMWF,
+  grade de ~9 km) no fuso `America/Sao_Paulo`. Fixar o produto evita que a série mude de modelo no meio
+  do período, o que acontece na combinação padrão da API.
+- **Ponto:** sede municipal de SSP (`{python} br(ssp["lat"], 4)`; `{python} br(ssp["lon"], 4)`).
+- **Período:** `{python} f"{serie['data'].min():%d/%m/%Y}"` a `{python} f"{serie['data'].max():%d/%m/%Y}"`,
+  `{python} inteiro(len(serie))` dias, `{python} faltando` dias faltando. A série foi
+  `{python} origem`. O ERA5-Land chega com alguns dias de atraso, por isso ela não vai até ontem.
+- **Anos completos:** os indicadores anuais e as tendências usam só `{python} ANO_INI`–`{python} ANO_FIM`.
+
+A série **não tem correção de viés**: na validação preliminar com as estações do INMET, a Open-Meteo
+subestimou a Tmax e superestimou a Tmin. Como o limiar é o percentil 90 da própria série, esse erro fixo
+não muda a contagem das ondas. A seção [Validação com o INMET](#sec-validacao) testa a correção numa
+estação e mostra que ela não melhora a detecção das ondas.
+
+## Limiares
+
+O critério de onda de calor é o de @oliveira2021: um **dia quente** tem a Tmax **e** a Tmin acima do
+percentil 90 (P90) do seu dia do ano, e uma **onda de calor** são 3 ou mais dias quentes seguidos.
+O P90 de cada dia do ano é calculado com todos os valores do período-base 1991–2020 numa janela de
+15 dias centrada no dia, circular na virada do ano [@perkins2013].
+
+```{python}
+#| label: fig-limiares
+#| fig-cap: "Percentil 90 da Tmax e da Tmin para cada dia do ano (período-base 1991–2020, janela de 15 dias)."
+lim = ondas.limiares_p90(serie)
+inicio_mes = pd.date_range("2000-01-01", "2000-12-01", freq="MS").dayofyear
+
+fig, ax = plt.subplots(figsize=(10, 3.8), layout="constrained")
+graficos.estilo_eixo(ax)
+for col, cor, rot in (("p90_tmax", COR_TMAX, "P90 da Tmax"), ("p90_tmin", COR_TMIN, "P90 da Tmin")):
+    ax.plot(lim.index, lim[col], color=cor, lw=1.8)
+    ax.annotate(rot, (lim.index[-1], lim[col].iloc[-1]), xytext=(6, 0), textcoords="offset points",
+                color=cor, fontsize=9, va="center")
+ax.set_xticks(inicio_mes, MESES)
+ax.set_xlim(1, 366 + 40)
+plt.show()
+```
+
+```{python}
+#| output: asis
+def mes_do_dia(dia: int) -> str:
+    return MESES[(pd.Timestamp("2000-01-01") + pd.Timedelta(days=int(dia) - 1)).month - 1].lower()
+
+pico = mes_do_dia(lim["p90_tmax"].idxmax())
+print(
+    f"O P90 da Tmax vai de {br(lim['p90_tmax'].min())} °C (em {mes_do_dia(lim['p90_tmax'].idxmin())}) "
+    f"a {br(lim['p90_tmax'].max())} °C (em {pico}), e o da Tmin vai de "
+    f"{br(lim['p90_tmin'].min())} °C (em {mes_do_dia(lim['p90_tmin'].idxmin())}) a "
+    f"{br(lim['p90_tmin'].max())} °C (em {mes_do_dia(lim['p90_tmin'].idxmax())})."
+    + (" O pico da Tmax antes do verão acompanha o fim da estação seca, quando o céu limpo e o solo seco "
+       "esquentam mais a tarde." if pico in ("set", "out") else "")
+)
+```
+
+## Ondas de calor
+
+```{python}
+#| label: ondas
+quentes = ondas.dias_quentes(serie, lim)
+eventos = ondas.ondas_de_calor(quentes)
+ev_anos = eventos[eventos["inicio"].dt.year <= ANO_FIM]
+ind = ondas.indicadores_anuais(ev_anos, ANOS)
+```
+
+```{python}
+#| output: asis
+metade = ANO_INI + len(ANOS) // 2
+antes, depois = ind.loc[: metade - 1], ind.loc[metade:]
+print(
+    f"De {serie['data'].min():%d/%m/%Y} a {serie['data'].max():%d/%m/%Y} houve "
+    f"**{inteiro(int(quentes['quente'].sum()))} dias quentes** e **{len(eventos)} ondas de calor**, "
+    f"de {eventos['duracao'].min()} a {eventos['duracao'].max()} dias. Na primeira metade do período "
+    f"({ANO_INI}–{metade - 1}) foram {antes['HWN'].sum()} ondas e {antes['HWF'].sum()} dias em onda; "
+    f"na segunda ({metade}–{ANO_FIM}), {depois['HWN'].sum()} ondas e {depois['HWF'].sum()} dias."
+)
+```
+
+```{python}
+#| label: tbl-maiores
+#| tbl-cap: "As 15 maiores ondas de calor em SSP (ordenadas pela duração e, no empate, pela intensidade). Intensidade = média de (Tmax − P90 da Tmax) nos dias da onda."
+top = eventos.sort_values(["duracao", "intensidade"], ascending=False).head(15)
+tabela(pd.DataFrame({
+    "Início": top["inicio"].dt.strftime("%d/%m/%Y"),
+    "Fim": top["fim"].dt.strftime("%d/%m/%Y"),
+    "Duração (dias)": top["duracao"],
+    "Intensidade (°C)": top["intensidade"],
+}), 1)
+```
+
+```{python}
+#| label: fig-ultimos5
+#| fig-cap: "Tmax diária dos últimos 5 anos da série, com o P90 da Tmax do dia (cinza) e as ondas de calor destacadas (faixas vermelhas)."
+fim = serie["data"].max()
+rec = quentes[quentes["data"] > fim - pd.DateOffset(years=5)]
+fig, ax = plt.subplots(figsize=(11, 4), layout="constrained")
+graficos.estilo_eixo(ax)
+for e in eventos[eventos["fim"] >= rec["data"].min()].itertuples():
+    ax.axvspan(e.inicio - pd.Timedelta(hours=12), e.fim + pd.Timedelta(hours=12), color=COR_ONDA, alpha=0.25, lw=0)
+ax.plot(rec["data"], rec["p90_tmax"], color=graficos.COR_NORMAL, lw=1, label="P90 da Tmax")
+ax.plot(rec["data"], rec["tmax"], color=COR_TMAX, lw=0.9, label="Tmax diária")
+onda = rec[rec["data"].apply(lambda d: ((eventos["inicio"] <= d) & (eventos["fim"] >= d)).any())]
+ax.scatter(onda["data"], onda["tmax"], s=10, color=COR_ONDA, zorder=3, label="Dia em onda de calor")
+ax.xaxis.set_major_locator(mdates.MonthLocator(bymonth=(1, 7)))
+ax.xaxis.set_major_formatter(mdates.DateFormatter("%m/%Y"))
+ax.legend(loc="lower left", ncols=3, frameon=False, fontsize=8.5, labelcolor=graficos.COR_TEXTO_2)
+plt.show()
+```
+
+```{python}
+#| label: fig-hwf
+#| fig-cap: "Dias em onda de calor por ano em SSP (HWF); cada onda conta no ano em que começa."
+fig, ax = plt.subplots(figsize=(11, 3.6), layout="constrained")
+graficos.estilo_eixo(ax, unidade="")
+ax.bar(ind.index, ind["HWF"], color=COR_ONDA, width=0.75)
+ax.set_xticks(range(ANO_INI, ANO_FIM + 1, 5))
+ax.set_ylabel("dias", color=graficos.COR_TEXTO_2, fontsize=9)
+ax.set_xlim(ANO_INI - 0.8, ANO_FIM + 0.8)
+plt.show()
+```
+
+## Tendência
+
+A tendência de cada indicador anual (`{python} ANO_INI`–`{python} ANO_FIM`) foi testada com o teste
+de Mann-Kendall, e a taxa de variação, com o declive de Sen (pacote `pymannkendall`, @hussain2019).
+Considera-se significativo p < 0,05.
+
+```{python}
+#| label: tbl-tendencia
+#| tbl-cap: "Teste de Mann-Kendall e declive de Sen dos indicadores anuais de ondas de calor em SSP."
+NOMES = {
+    "HWN": ("HWN: número de ondas", "ondas"),
+    "HWF": ("HWF: dias em onda", "dias"),
+    "HWD": ("HWD: maior duração", "dias"),
+    "intensidade": ("Intensidade média", "°C"),
+}
+tend = pd.DataFrame({c: ondas.tendencia(ind[c]) for c in NOMES}).T
+tabela(pd.DataFrame({
+    "Indicador": [NOMES[c][0] for c in tend.index],
+    "tau": tend["tau"].astype(float).round(2),
+    "p-valor": tend["p"].map(lambda p: "< 0,001" if p < 0.001 else br(p, 3)),
+    "Sen (por década)": [f"{br(v, 2, sinal=True)} {NOMES[c][1]}" for c, v in tend["declive_decada"].items()],
+    "Significativo": np.where(tend["p"] < 0.05, "Sim", "Não"),
+}))
+```
+
+```{python}
+#| output: asis
+for c, r in tend.iterrows():
+    nome, un = NOMES[c]
+    p_txt = "p < 0,001" if r["p"] < 0.001 else f"p = {br(r['p'], 3)}"
+    sentido = "aumento" if r["tau"] > 0 else "redução"
+    if r["p"] >= 0.05:
+        frase = f"sem tendência significativa (τ = {br(r['tau'], 2)}, {p_txt})."
+    elif r["declive_decada"] == 0:
+        zeros = int((ind[c] == 0).sum())
+        frase = (
+            f"tendência de {sentido} significativa (τ = {br(r['tau'], 2)}, {p_txt}), mas o declive de Sen é zero: "
+            f"em {zeros} dos {len(ind)} anos não houve onda, e a mediana das inclinações entre pares de anos "
+            "fica nula. O teste mostra que os valores altos se concentram nos anos recentes, mas o Sen não "
+            "consegue dar uma taxa por década."
+        )
+    else:
+        frase = (
+            f"tendência de {sentido} significativa (τ = {br(r['tau'], 2)}, {p_txt}), de "
+            f"{br(r['declive_decada'], 2, sinal=True)} {un} por década pelo declive de Sen."
+        )
+    print(f"- **{nome}:** {frase}")
+```
+
+## Validação com o INMET {#sec-validacao}
+
+Duas perguntas guiam esta seção:
+
+1. Dá para **reconstruir a série de uma estação do INMET nos anos em que ela não existia**, a partir
+   do ERA5-Land? E inverter a série no tempo e prevê-la "para trás" (*backcasting*) é uma boa forma de fazer isso?
+2. As ondas de calor encontradas no ERA5-Land são as mesmas que um termômetro de estação registraria?
+
+O teste usa a estação automática do INMET em **Passos (A516)**, a mais próxima de SSP com uma série longa.
+A de SSP (A561) tem poucos anos completos.
+
+```{python}
+#| label: validacao-dados
+COD = "A516"
+est = regiao.estacoes().set_index("codigo").loc[COD]
+obs = pd.read_csv(DADOS / "inmet_bdmep_diario.csv", parse_dates=["data"], dtype={"codigo": str})
+obs = obs[(obs["codigo"] == COD) & obs["data"].dt.year.between(2006, 2025)][["data", "tmax", "tmin"]]
+obs = obs.dropna(subset=["tmax", "tmin"], how="all").reset_index(drop=True)
+
+ARQ_EST = DADOS / "era5land_a516.csv"
+try:
+    mod = fontes.open_meteo_historico(est["lat"], est["lon"], "2006-01-01", "2025-12-31", models="era5_land")
+    mod = mod[["data", "tmax", "tmin"]]
+    mod.to_csv(ARQ_EST, index=False, date_format="%Y-%m-%d")
+except Exception:
+    mod = pd.read_csv(ARQ_EST, parse_dates=["data"])
+
+obs_ok = obs.dropna(subset=["tmax", "tmin"])
+dias_possiveis = pd.date_range(obs["data"].min(), "2025-12-31").size
+lat1, lon1, lat2, lon2 = map(np.radians, (ssp["lat"], ssp["lon"], est["lat"], est["lon"]))
+dist_km = 6371 * 2 * np.arcsin(np.sqrt(
+    np.sin((lat2 - lat1) / 2) ** 2 + np.cos(lat1) * np.cos(lat2) * np.sin((lon2 - lon1) / 2) ** 2
+))
+```
+
+- **Estação:** Passos (A516), a `{python} br(dist_km, 0)` km da sede de SSP e a `{python} br(est["altitude"], 0)` m
+  de altitude. Os dados horários do Banco de Dados Meteorológicos do INMET (BDMEP) foram convertidos em Tmax e Tmin
+  diárias no horário local. A série vai de `{python} f"{obs['data'].min():%d/%m/%Y}"` a 31/12/2025 e tem Tmax e Tmin em
+  `{python} inteiro(len(obs_ok))` dos `{python} inteiro(dias_possiveis)` dias
+  (`{python} br(100 * len(obs_ok) / dias_possiveis, 0)`%).
+- **Modelo:** ERA5-Land [@munozsabater2021] no ponto da estação, pela mesma API e com o mesmo
+  `models=era5_land` da série de SSP.
+
+### Teste 1: reconstruir 2006–2010
+
+Para saber se um método acerta o passado, é preciso ter a resposta certa. Por isso o teste **esconde** os
+primeiros cinco anos da estação (2006–2010), deixa os métodos aprenderem só com 2011–2025 e compara a
+reconstrução com o que a estação mediu de fato. Foram comparados quatro métodos:
+
+- **ERA5-Land sem correção:** a referência. Um método que não supera isso não serve.
+- ***Backcasting* só com a estação:** a série da estação em 2011–2025 é invertida no tempo, um modelo de
+  séries temporais (decomposição MSTL com tendência por ETS) é ajustado e prevê os dias "seguintes", que na
+  série invertida são os anteriores a 2011. Depois a previsão é desinvertida. É o procedimento da seção 13.6
+  de @hyndman2026.
+- **ERA5-Land menos o viés do mês:** em 2011–2025 calcula-se, para cada mês do ano, a diferença média
+  (ERA5-Land − estação). Essa diferença é descontada de cada dia de 2006–2010.
+- **ERA5-Land por quantis:** mapeamento de quantis empírico, mês a mês [@gudmundsson2012]. Cada valor do
+  ERA5-Land vai para a mesma posição (quantil) na distribuição da estação.
+
+```{python}
+#| label: teste1
+treino, teste = obs[obs["data"].dt.year >= 2011], obs[obs["data"].dt.year <= 2010]
+par_tr = rc.pares(treino, mod)
+alvo = mod[mod["data"].dt.year <= 2010]
+METODOS_REC = {
+    "ERA5-Land sem correção": alvo,
+    "Backcasting só com a estação": rc.backcast(treino, pd.date_range("2006-01-01", "2010-12-31")),
+    "ERA5-Land − viés do mês": rc.corrige_mes(alvo, par_tr),
+    "ERA5-Land por quantis": rc.corrige_quantis(alvo, par_tr),
+}
+err = {nome: rc.erros(teste, r) for nome, r in METODOS_REC.items()}
+```
+
+```{python}
+#| label: tbl-teste1
+#| tbl-cap: "Erro diário da reconstrução de 2006–2010 em Passos (A516), em °C, contra o que a estação mediu. Viés: erro médio (negativo = abaixo da estação); REQM: raiz do erro quadrático médio (tamanho típico do erro); r: correlação com a estação."
+tabela(pd.DataFrame([
+    {"Método": nome,
+     "Viés Tmax": e.loc["tmax", "vies"], "REQM Tmax": e.loc["tmax", "reqm"], "r Tmax": e.loc["tmax", "r"],
+     "Viés Tmin": e.loc["tmin", "vies"], "REQM Tmin": e.loc["tmin", "reqm"], "r Tmin": e.loc["tmin", "r"]}
+    for nome, e in err.items()
+]))
+```
+
+```{python}
+#| output: asis
+reqm = {n: e.loc["tmax", "reqm"] for n, e in err.items()}
+bc, cru = err["Backcasting só com a estação"], err["ERA5-Land sem correção"]
+melhor_rec = min(reqm, key=reqm.get)
+print(
+    f"O **backcasting foi o pior método**: o erro típico da Tmax foi de {br(bc.loc['tmax', 'reqm'], 2)} °C, contra "
+    f"{br(cru.loc['tmax', 'reqm'], 2)} °C do ERA5-Land sem correção, e a correlação caiu para {br(bc.loc['tmax', 'r'], 2)}. "
+    "Ele só conhece a própria estação: sabe que janeiro costuma ser quente e julho frio, mas não sabe que houve uma "
+    "frente fria num dia específico de 2008. Por isso desenha uma curva média, e não os dias de verdade. Além disso, "
+    f"ele levou a tendência de aquecimento de 2011–2025 para trás e esfriou demais o passado (viés de "
+    f"{br(bc.loc['tmax', 'vies'], 1, sinal=True)} °C na Tmax).\n\n"
+    f"O **melhor foi o ERA5-Land menos o viés do mês** (REQM da Tmax de {br(reqm[melhor_rec], 2)} °C), quase empatado "
+    "com os quantis. O ERA5-Land sabe o que aconteceu em cada dia do passado, porque a reanálise usa as observações "
+    "da época; a correção só tira o erro sistemático dele. A correlação não muda com a correção, porque descontar um "
+    "valor por mês não muda o sobe e desce dos dias."
+)
+```
+
+```{python}
+#| label: fig-teste1
+#| fig-cap: "Tmax diária em Passos de agosto a novembro de 2007, um período escondido no teste: a estação (preto), o ERA5-Land menos o viés do mês (laranja) e o backcasting (cinza tracejado)."
+ini, fim_j = pd.Timestamp("2007-08-01"), pd.Timestamp("2007-11-30")
+fig, ax = plt.subplots(figsize=(11, 3.8), layout="constrained")
+graficos.estilo_eixo(ax)
+linhas_fig = (
+    (teste, "Estação (INMET)", "#222222", "-", 1.4),
+    (METODOS_REC["ERA5-Land − viés do mês"], "ERA5-Land − viés do mês", COR_TMAX, "-", 1.2),
+    (METODOS_REC["Backcasting só com a estação"], "Backcasting", graficos.COR_NORMAL, (0, (4, 2)), 1.2),
+)
+for df_, rot, cor, ls, lw in linhas_fig:
+    s = df_.set_index("data")["tmax"].reindex(pd.date_range(ini, fim_j))
+    ax.plot(s.index, s.to_numpy(), color=cor, ls=ls, lw=lw, label=rot)
+ax.yaxis.set_major_locator(plt.MultipleLocator(2))
+ax.xaxis.set_major_locator(mdates.MonthLocator())
+ax.xaxis.set_major_formatter(mdates.DateFormatter("%m/%Y"))
+ax.legend(loc="lower right", ncols=3, frameon=False, fontsize=8.5, labelcolor=graficos.COR_TEXTO_2)
+plt.show()
+```
+
+### Teste 2: as ondas de calor
+
+Em 2006–2010 a estação teve poucos dias quentes e nenhuma onda, o que não basta para medir acerto. Por isso
+o segundo teste usa **validação cruzada em blocos**: os 20 anos (2006–2025) foram divididos em quatro blocos
+de cinco anos, e cada bloco foi escondido e reconstruído com a correção calibrada nos outros três. Assim, todos
+os anos são reconstruídos sem que o método os tenha visto. O *backcasting* ficou de fora, porque já tinha
+falhado no Teste 1 e só serve para os anos antes do começo da série.
+
+Os dias quentes e as ondas seguem o mesmo critério das seções anteriores, com o P90 calculado em 2006–2025
+(o da estação para a estação e as séries corrigidas; o do próprio ERA5-Land para o ERA5-Land sem correção).
+A comparação usa só os dias em que a estação tem Tmax e Tmin, com três medidas de acerto dos dias quentes
+[@wilks2019]:
+
+- **POD** (taxa de acerto): dos dias quentes da estação, a fração que o método também marcou;
+- **FAR** (alarme falso): dos dias que o método marcou como quentes, a fração que não era quente na estação;
+- **CSI** (índice de acerto): acertos ÷ dias marcados por qualquer um dos dois. Vale 1 se tudo coincide e 0 se nada coincide.
+
+```{python}
+#| label: teste2
+BLOCOS = [(2006, 2010), (2011, 2015), (2016, 2020), (2021, 2025)]
+rec_bl = rc.blocos(obs, mod, BLOCOS)
+lim_est, lim_mod = ondas.limiares_p90(obs, 2006, 2025), ondas.limiares_p90(mod, 2006, 2025)
+ac = {"Estação (INMET)": rc.acerto_ondas(obs, obs, lim_est, lim_est)}
+NOMES_BL = {"cru": "ERA5-Land sem correção", "mes": "ERA5-Land − viés do mês", "quantis": "ERA5-Land por quantis"}
+for k, nome in NOMES_BL.items():
+    ac[nome] = rc.acerto_ondas(obs, rec_bl[k], lim_est, lim_mod if k == "cru" else lim_est)
+pct = lambda v: f"{100 * v:.0f}%"
+```
+
+```{python}
+#| label: tbl-teste2
+#| tbl-cap: "Dias quentes e ondas de calor em Passos (A516), 2006–2025, só nos dias com dado da estação. As séries corrigidas foram reconstruídas por validação cruzada em blocos de 5 anos. Intensidade = média de (Tmax − P90 da Tmax) nos dias das ondas."
+est_ac = ac["Estação (INMET)"]
+tabela(pd.DataFrame([
+    {"Série": nome, "Dias quentes": a["dias_quentes"],
+     "POD": "—" if nome.startswith("Estação") else pct(a["pod"]),
+     "FAR": "—" if nome.startswith("Estação") else pct(a["far"]),
+     "CSI": "—" if nome.startswith("Estação") else pct(a["csi"]),
+     "Ondas": a["ondas"],
+     "Ondas da estação encontradas": "—" if nome.startswith("Estação") else f"{a['ondas_obs_achadas']} de {a['ondas_obs']}",
+     "Intensidade (°C)": a["intensidade"]}
+    for nome, a in ac.items()
+]), 2)
+```
+
+```{python}
+#| output: asis
+cru_ac = ac["ERA5-Land sem correção"]
+corr = [ac[n] for n in ("ERA5-Land − viés do mês", "ERA5-Land por quantis")]
+print(
+    f"Nos dias com dado, a estação teve **{est_ac['dias_quentes']} dias quentes e {est_ac['ondas']} ondas** em 20 anos. "
+    f"O ERA5-Land sem correção marcou **{cru_ac['dias_quentes']} dias quentes** "
+    f"({br(cru_ac['dias_quentes'] / est_ac['dias_quentes'], 1)} vezes o número da estação) e {cru_ac['ondas']} ondas. "
+    f"Ele pegou {pct(cru_ac['pod'])} dos dias quentes da estação, e {pct(cru_ac['far'])} dos dias quentes dele "
+    f"foram alarme falso.\n\n"
+    "**A correção não melhorou a detecção:** com o viés do mês ou com os quantis, o POD, o FAR e o CSI ficaram "
+    f"praticamente iguais (CSI de {pct(cru_ac['csi'])} sem correção, {pct(corr[0]['csi'])} e {pct(corr[1]['csi'])} "
+    "com correção). A correção conserta o erro fixo (o viés) e o achatamento da distribuição, mas não conserta o "
+    "**erro de dia a dia**: o modelo esquentar num dia em que a estação não esquentou. O critério exige Tmax **e** Tmin "
+    "altas no mesmo dia, e na estação essa coincidência é mais rara. Uma explicação provável é que, mesmo depois de "
+    "uma tarde quente, a noite no ponto da estação pode esfriar por efeitos locais (céu limpo, ar frio que desce "
+    "para as partes baixas do relevo), que o ERA5-Land, por representar a média de uma área de ~9 km, não capta."
+)
+```
+
+### O que o teste mostra
+
+1. **Backcasting:** é uma técnica válida e descrita na literatura [@hyndman2026, seção 13.6], mas foi o pior
+   método aqui. Quando há uma reanálise para o período, ela informa o que aconteceu em cada dia, e um modelo que
+   usa só a própria estação não tem como saber isso.
+2. **Reconstruir a temperatura do passado de uma estação:** o ERA5-Land menos o viés de cada mês foi o melhor
+   método e é o mais simples. Os quantis ficaram muito perto.
+3. **Ondas de calor:** o ERA5-Land conta mais dias quentes e mais ondas do que uma estação, e a correção de viés
+   não muda isso. Os números de ondas do ERA5-Land devem ser lidos como **relativos**: servem para comparar épocas
+   e medir a tendência numa série homogênea, mas não são a contagem que um termômetro daria.
+
+**Limites:** o teste usou uma estação só. As falhas da estação quebram sequências de dias quentes e podem baixar
+o número de ondas observadas. E 5 ondas em 20 anos são poucas para conclusões firmes. O próximo passo é repetir
+o teste nas outras estações automáticas da região.
+
+## Séries temporais e previsão
+
+Esta seção segue o livro *Forecasting: Principles and Practice, the Pythonic Way* [@hyndman2026],
+com a biblioteca `statsforecast` (Nixtla), a mesma usada no livro.
+
+### Médias mensais
+
+```{python}
+#| label: mensal
+dias = serie.groupby(serie["data"].dt.to_period("M")).agg(
+    tmax=("tmax", "mean"), tmin=("tmin", "mean"), n=("data", "size")
+)
+completos = dias["n"] == dias.index.days_in_month
+mensal = dias[completos].drop(columns="n")
+mensal.index = mensal.index.to_timestamp()
+longo = (
+    mensal.rename(columns={"tmax": "Tmax", "tmin": "Tmin"})
+    .rename_axis("ds").reset_index()
+    .melt(id_vars="ds", var_name="unique_id", value_name="y")
+)
+```
+
+```{python}
+#| label: fig-mensal
+#| fig-cap: "Médias mensais de Tmax e Tmin em SSP (meses completos)."
+fig, ax = plt.subplots(figsize=(11, 3.8), layout="constrained")
+graficos.estilo_eixo(ax)
+for col, cor, rot in (("tmax", COR_TMAX, "Tmax"), ("tmin", COR_TMIN, "Tmin")):
+    ax.plot(mensal.index, mensal[col], color=cor, lw=0.9, label=rot)
+ax.legend(loc="lower left", ncols=2, frameon=False, fontsize=8.5, labelcolor=graficos.COR_TEXTO_2)
+plt.show()
+```
+
+São `{python} len(mensal)` meses, de `{python} f"{mensal.index.min():%m/%Y}"` a
+`{python} f"{mensal.index.max():%m/%Y}"`. O mês corrente fica de fora por estar incompleto.
+
+### Decomposição STL
+
+A decomposição STL separa cada série em tendência, sazonalidade e resto (sazonalidade de 12 meses, versão robusta).
+
+```{python}
+#| label: fig-stl
+#| fig-cap: "Decomposição STL das médias mensais de Tmax (esquerda) e Tmin (direita)."
+stl = {v: STL(mensal[v], period=12, robust=True).fit() for v in ("tmax", "tmin")}
+fig, eixos = plt.subplots(4, 2, figsize=(11, 8), sharex=True, layout="constrained")
+partes = (("observed", "Série"), ("trend", "Tendência"), ("seasonal", "Sazonalidade"), ("resid", "Resto"))
+for j, (v, cor) in enumerate((("tmax", COR_TMAX), ("tmin", COR_TMIN))):
+    for i, (attr, rot) in enumerate(partes):
+        ax = eixos[i, j]
+        graficos.estilo_eixo(ax)
+        ax.plot(mensal.index, getattr(stl[v], attr), color=cor, lw=0.9)
+        if attr == "trend":  # variação pequena: precisa de uma casa decimal
+            ax.yaxis.set_major_formatter(lambda val, _: f"{br(val)} °C")
+        if attr == "resid":
+            ax.axhline(0, color=graficos.COR_EIXO, lw=0.8)
+        ax.set_title(f"{rot} ({v.capitalize()})", loc="left", fontsize=9.5)
+plt.show()
+```
+
+```{python}
+#| output: asis
+def forca(r):
+    """Força da tendência e da sazonalidade (Hyndman et al.): 1 − var(resto) / var(componente + resto)."""
+    ft = max(0, 1 - r.resid.var() / (r.trend + r.resid).var())
+    fs = max(0, 1 - r.resid.var() / (r.seasonal + r.resid).var())
+    return ft, fs
+
+(ftx, fsx), (ftn, fsn) = forca(stl["tmax"]), forca(stl["tmin"])
+tend_stl = {v: stl[v].trend.iloc[-60:].mean() - stl[v].trend.iloc[:60].mean() for v in stl}
+print(
+    f"A sazonalidade domina as duas séries (força da sazonalidade de {br(fsx, 2)} na Tmax e {br(fsn, 2)} na Tmin, "
+    f"numa escala de 0 a 1). Dos 5 primeiros aos 5 últimos anos da série, a componente de tendência variou "
+    f"{br(tend_stl['tmax'], 1, sinal=True)} °C na Tmax e {br(tend_stl['tmin'], 1, sinal=True)} °C na Tmin "
+    "(as pontas da tendência STL são instáveis, por isso a comparação usa médias de 5 anos)."
+)
+```
+
+### Modelos e validação cruzada
+
+Foram comparados três modelos: o **ingênuo sazonal** (repete o valor do mesmo mês do ano anterior, usado
+como referência), o **ETS** (suavização exponencial, com a forma escolhida automaticamente pelo AICc) e o
+**ARIMA sazonal** (ordem escolhida automaticamente). A validação cruzada usa origem móvel nos últimos
+5 anos: o modelo é ajustado com os dados até uma data, prevê os 12 meses seguintes, e a origem avança
+12 meses, em 5 janelas.
+
+```{python}
+#| label: cv
+MODELOS = {"SeasonalNaive": "Ingênuo sazonal", "AutoETS": "ETS", "AutoARIMA": "ARIMA sazonal"}
+sf = StatsForecast(
+    models=[SeasonalNaive(season_length=12), AutoETS(season_length=12), AutoARIMA(season_length=12)],
+    freq="MS", n_jobs=1,
+)
+cv = sf.cross_validation(df=longo, h=12, n_windows=5, step_size=12)
+erros = []
+for uid, g in cv.groupby("unique_id"):
+    for m, nome in MODELOS.items():
+        e = g[m] - g["y"]
+        erros.append({"Variável": uid, "Modelo": nome, "EAM (°C)": e.abs().mean(), "REQM (°C)": np.sqrt((e**2).mean())})
+erros = pd.DataFrame(erros)
+melhor = erros.loc[erros.groupby("Variável")["REQM (°C)"].idxmin()].set_index("Variável")
+```
+
+```{python}
+#| label: tbl-cv
+#| tbl-cap: "Erro das previsões de 12 meses na validação cruzada (5 origens nos últimos 5 anos). EAM: erro absoluto médio; REQM: raiz do erro quadrático médio."
+tabela(erros, 2)
+```
+
+```{python}
+#| output: asis
+ref = erros[erros["Modelo"] == "Ingênuo sazonal"].set_index("Variável")["REQM (°C)"]
+print(" ".join(
+    f"Para a **{v}**, o melhor modelo foi o **{melhor.loc[v, 'Modelo']}** (REQM de {br(melhor.loc[v, 'REQM (°C)'], 2)} °C, "
+    f"contra {br(ref[v], 2)} °C do ingênuo sazonal)."
+    for v in melhor.index
+))
+```
+
+### Previsão dos próximos 24 meses
+
+```{python}
+#| label: fig-previsao
+#| fig-cap: "Previsão das médias mensais para os próximos 24 meses com o melhor modelo de cada variável, com intervalos de 80% (mais escuro) e 95% (mais claro)."
+prev = sf.forecast(df=longo, h=24, level=[80, 95])
+inv = {v: k for k, v in MODELOS.items()}
+fig, eixos = plt.subplots(1, 2, figsize=(11, 3.8), sharey=False, layout="constrained")
+for ax, (uid, cor) in zip(eixos, (("Tmax", COR_TMAX), ("Tmin", COR_TMIN))):
+    m = inv[melhor.loc[uid, "Modelo"]]
+    p = prev[prev["unique_id"] == uid]
+    h = longo[(longo["unique_id"] == uid) & (longo["ds"] > longo["ds"].max() - pd.DateOffset(years=5))]
+    graficos.estilo_eixo(ax)
+    ax.fill_between(p["ds"], p[f"{m}-lo-95"], p[f"{m}-hi-95"], color=cor, alpha=0.15, lw=0)
+    ax.fill_between(p["ds"], p[f"{m}-lo-80"], p[f"{m}-hi-80"], color=cor, alpha=0.3, lw=0)
+    ax.plot(h["ds"], h["y"], color=cor, lw=1.2)
+    ax.plot(p["ds"], p[m], color=cor, lw=1.4, ls=(0, (3, 2)))
+    ax.set_title(f"{uid}: {melhor.loc[uid, 'Modelo']}", loc="left", fontsize=10.5)
+    ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y"))
+plt.show()
+```
+
+```{python}
+#| output: asis
+linhas = []
+for uid in ("Tmax", "Tmin"):
+    m = inv[melhor.loc[uid, "Modelo"]]
+    p = prev[prev["unique_id"] == uid].set_index("ds")
+    q, f = p[m].idxmax(), p[m].idxmin()
+    linhas.append(
+        f"Na **{uid}**, a média mensal prevista vai de {br(p.loc[f, m])} °C ({MESES[f.month - 1].lower()}/{f.year}) "
+        f"a {br(p.loc[q, m])} °C ({MESES[q.month - 1].lower()}/{q.year}); a largura média do intervalo de 95% é de "
+        f"{br((p[f'{m}-hi-95'] - p[f'{m}-lo-95']).mean())} °C."
+    )
+print(" ".join(linhas), "A previsão reproduz o ciclo sazonal, mas modelos que usam só a própria série não antecipam "
+      "anos anômalos (como os de El Niño); por isso os intervalos são largos.")
+```
+
+## Próximos passos
+
+1. **Validação nas outras estações:** repetir o teste de reconstrução e de ondas de calor nas demais
+   estações automáticas do INMET da região, para ver se o resultado de Passos se repete.
+2. **Outros municípios:** repetir a análise para os demais municípios da mesorregião Sul/Sudoeste de
+   Minas e comparar a frequência e a tendência das ondas de calor entre eles.
+
+## Referências
+
+::: {#refs}
+:::

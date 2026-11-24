@@ -6,7 +6,20 @@ __pycache__/
 # saídas do Quarto (o Connect Cloud renderiza o .qmd no servidor)
 relatorio.html
 relatorio_files/
+relatorio2.html
+relatorio2_files/
 .quarto/
+
+# saídas do LaTeX e pacote para o Overleaf
+artigo/*.aux
+artigo/*.bbl
+artigo/*.blg
+artigo/*.log
+artigo/*.out
+artigo/*.toc
+artigo/*.synctex.gz
+artigo/*.pdf
+artigo/*.zip
 
 # configurações locais de ferramentas
 .claude/
